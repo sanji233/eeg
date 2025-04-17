@@ -28,7 +28,8 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
-
+.gitignore
+dockerfile
 # PyInstaller
 # 通常这些文件在 PyInstaller 构建可执行文件之前由 Python 脚本从模板写入，
 # 以便向其中注入日期或其他信息。
