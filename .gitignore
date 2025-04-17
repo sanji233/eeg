@@ -1,0 +1,145 @@
+# =========================
+# 通用 Python 文件
+# =========================
+# 字节编译/优化/DLL 文件
+__pycache__/
+*.py[cod]
+*$py.class$
+
+# C 扩展
+*.so
+
+# 分发/打包
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+# 通常这些文件在 PyInstaller 构建可执行文件之前由 Python 脚本从模板写入，
+# 以便向其中注入日期或其他信息。
+*.manifest
+*.spec
+
+# 安装程序日志
+pip-log.txt
+pip-delete-this-directory.txt
+
+# 单元测试/覆盖率报告
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# 环境 (venv, conda 等)
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+# Conda 环境
+conda-meta/
+conda-bld/
+
+# =========================
+# IDE / 编辑器
+# =========================
+# VS Code
+.vscode/*
+# 如果需要共享 VSCode 配置，可以取消下面几行的注释
+# !.vscode/settings.json
+# !.vscode/tasks.json
+# !.vscode/launch.json
+# !.vscode/extensions.json
+
+# PyCharm
+.idea/
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# =========================
+# Jupyter Notebooks
+# =========================
+.ipynb_checkpoints
+# 提示：如果你的 Notebook 输出很大或者经常变动，
+# 可以考虑使用 'nbstripout' 等工具在提交前自动清理输出：
+# pip install nbstripout
+# nbstripout --install
+
+# =========================
+# 操作系统生成的文件
+# =========================
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+# 缩略图
+._*
+# 可能出现在卷根目录的文件
+.Spotlight-V100
+.Trashes
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# =========================
+# 临时文件和日志
+# =========================
+*.log
+*.log.*
+*.tmp
+*~
+*.bak
+*.swp
+
+# =========================
+# 项目特定忽略
+# =========================
+# 结果目录 - 通常包含运行脚本后生成的文件
+results/
+
+# OpenViBE 数据目录 - 如果这里面的数据是生成的、下载的或者非常大，则应该忽略
+# 如果 'OpenViBE/data/' 目录包含的是需要版本控制的原始数据且大小合理，请删除下面这行
+OpenViBE/data/
+OpenViBE/script/video/
+# 如果 OpenViBE/script/video/ 目录下的 .wav 文件是生成的结果而不是原始资源，
+# 或者它们非常大不适合放在 Git 仓库里，可以取消下面这行的注释来忽略它们：
+# OpenViBE/script/video/
+
+# Docker 相关临时文件 (如果存在)
+# 注意： .dockerignore 文件用于控制哪些文件不被包含进 Docker 镜像构建上下文
+# 这里是忽略可能在本地项目目录中生成的 Docker 相关临时文件
+# .docker/
+# docker-compose.override.yml # 如果有本地覆盖配置
+
+# =========================
+# 在下面添加任何其他需要忽略的特定文件/目录
+# =========================
