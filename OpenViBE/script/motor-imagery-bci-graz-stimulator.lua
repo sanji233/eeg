@@ -36,7 +36,7 @@ function initialize(box)
     
     -- 检查试验次数是否合理
     if number_of_trials < 4 then
-        box:log("Warning", "试验次数少于4，可能不足以进行有效的四分类实验")
+        box:log("Warning", "试验次数少于4,可能不足以进行有效的四分类实验")
         number_of_trials = 4 -- 设置最小值为4
     end
 
