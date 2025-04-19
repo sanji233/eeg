@@ -3,6 +3,10 @@ import torch
 from torch.utils.data import Dataset
 
 class EEGDataset(Dataset):
+    """
+    split the dataset -> train,val,test
+
+    """
     def __init__(self, x, y=None, split=None):
         # x: (n_samples, n_channels, n_times)
         # y: (n_samples, )
@@ -57,3 +61,4 @@ class EEGDataset(Dataset):
             return self.inference_ds
         else:
             raise TypeError("Unknown dataset split!")
+    
