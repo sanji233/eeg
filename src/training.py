@@ -157,26 +157,34 @@ class ModelWrapper(L.LightningModule):
     def training_step(self, batch, batch_nb):
         """
         训练步骤
-        
+
         参数:
             batch: 当前批次的数据
             batch_nb: 批次索引
         """
         x, y = batch
         y_hat = self(x)
-        
-        # 处理二分类和多分类情况
+    
+    # 处理二分类和多分类情况
         if self.num_classes == 2:
-            # 二分类
+        # 二分类
             y_onehot = F.one_hot(y, num_classes=2).float()
             loss = F.binary_cross_entropy_with_logits(y_hat, y_onehot)
         else:
-            # 多分类 
+        # 多分类 
             if self.class_weights is not None:
-                weights = torch.tensor(self.class_weights).to(self.device)
+            # 修改这里，将字典转换为适当的权重列表
+                if isinstance(self.class_weights, dict):
+                # 确保权重顺序正确
+                    weight_list = [self.class_weights.get(i, 1.0) for i in range(self.num_classes)]
+                    weights = torch.tensor(weight_list, dtype=torch.float32).to(self.device)
+                else:
+                    weights = torch.tensor(self.class_weights, dtype=torch.float32).to(self.device)
                 loss = F.cross_entropy(y_hat, y, weight=weights)
             else:
-                loss = F.cross_entropy(y_hat, y)
+                oss = F.cross_entropy(y_hat, y)
+
+
         
         # 计算准确率
         self.train_accuracy.update(y_hat, y)
@@ -251,11 +259,12 @@ class ModelWrapper(L.LightningModule):
         val_acc = self.val_acc_recorder.show().data.cpu().numpy()
         self.val_acc.append(val_acc)
         self.val_acc_recorder = AvgMeter()
-        
-        # 记录最佳验证精度
+    
+    # 记录最佳验证精度 - 将 NumPy 数组转换为浮点数
         if val_acc > self.best_val_acc:
             self.best_val_acc = val_acc
-            self.log("best_val_acc", self.best_val_acc)
+            # 修改这一行，确保 best_val_acc 是浮点数
+            self.log("best_val_acc", float(self.best_val_acc))
 
     def test_step(self, batch, batch_nb):
         """
