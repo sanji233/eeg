@@ -9,6 +9,7 @@ EEG主程序 - 用于训练和评估EEG分类模型
 """
 
 import os
+os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
 import numpy as np
 import torch
 import torch.nn as nn
@@ -39,7 +40,7 @@ warnings.filterwarnings('ignore')
 #-----------------------------
 
 # 数据参数
-DATA_DIR = 'D:\\data\\code\\eeg\\results'  # 数据文件夹路径
+DATA_DIR = 'eeg/OpenViBE/data'  # 数据文件夹路径
 DATA_PATTERN = '*.csv'  # 数据文件匹配模式
 MIN_REST_EPOCHS = None  # 最小静息epochs数量，设为None则自动判断
 
@@ -65,7 +66,7 @@ EXP_NAME = f"{MODEL}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"  # 实验名称
 # 类别权重参数 (可选)
 # 格式为字典，例如: {0: 1.0, 1: 1.0, 2: 1.5, 3: 1.0, 4: 0.8}
 # 设为None则根据数据分布自动计算
-CLASS_WEIGHTS = {0: 1.0, 1: 1.0, 2: 1.5, 3: 1.0, 4: 1.0}  # 增加"上"类别的权重
+CLASS_WEIGHTS = {0: 1.0, 1: 1.0, 2: 1.0, 3: 1.0, 4: 0.2}  # 增加"上"类别的权重
 
 #-----------------------------
 # 数据保存控制参数

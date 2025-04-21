@@ -14,6 +14,8 @@ import torch.nn.functional as F
 import math
 import numpy as np
 
+
+
 class PositionalEncoding(nn.Module):
     """
     位置编码模块，用于Transformer模型

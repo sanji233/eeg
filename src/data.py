@@ -629,7 +629,7 @@ if __name__ == "__main__":
     label_weights = {0: 1.0, 1: 1.0, 2: 1.5, 3: 1.0, 4: 1.0}
     
     # 加载数据
-    data_folder = "your_data_folder_path"
+    data_folder = "eeg/OpenViBE/data"
     X_all, y_all = load_all_csv_files(data_folder, label_weights=label_weights)
     
     if X_all is not None and y_all is not None:
