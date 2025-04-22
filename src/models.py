@@ -25,7 +25,7 @@ class PositionalEncoding(nn.Module):
         dropout: dropout率
         max_len: 最大序列长度
     """
-    def __init__(self, num_hiddens, dropout, max_len=1600):  # 修改为1600以支持6秒数据
+    def __init__(self, num_hiddens, dropout, max_len=1000):
         super().__init__()
         self.dropout = nn.Dropout(dropout)
         # 创建足够长的位置编码
@@ -157,7 +157,7 @@ class SimpleEEGModel(nn.Module):
         num_classes: 分类类别数
         seq_length: 序列长度
     """
-    def __init__(self, num_channels=8, num_classes=5, seq_length=1500):  # 修改默认值为1500
+    def __init__(self, num_channels=8, num_classes=5, seq_length=250):
         super().__init__()
         
         self.conv1 = nn.Conv1d(num_channels, 16, kernel_size=3, padding=1)
@@ -366,7 +366,7 @@ class EEGTransformerModel(nn.Module):
         seq_length: 输入序列长度
     """
     def __init__(self, num_channels=8, num_classes=5, d_model=128, nhead=8, num_layers=3, 
-                 dim_feedforward=256, dropout=0.1, seq_length=1500):  # 修改默认值为1500
+                 dim_feedforward=256, dropout=0.1, seq_length=250):
         super().__init__()
         
         # 卷积特征提取
@@ -498,7 +498,7 @@ class CNNLSTM(nn.Module):
         
         return x
 
-def create_model(model_name, num_channels=8, num_classes=5, seq_length=1500, **kwargs):  # 修改默认值为1500
+def create_model(model_name, num_channels=8, num_classes=5, seq_length=250, **kwargs):
     """
     创建指定名称的模型
     
