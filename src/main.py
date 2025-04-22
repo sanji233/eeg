@@ -40,6 +40,12 @@ warnings.filterwarnings('ignore')
 #-----------------------------
 
 # 数据参数
+# 在main.py中更新SEQ_LENGTH参数
+#-----------------------------
+# 配置参数（直接在此处修改）
+#-----------------------------
+
+# 数据参数
 DATA_DIR = 'eeg/OpenViBE/data'  # 数据文件夹路径
 DATA_PATTERN = '*.csv'  # 数据文件匹配模式
 MIN_REST_EPOCHS = None  # 最小静息epochs数量，设为None则自动判断
@@ -48,14 +54,14 @@ MIN_REST_EPOCHS = None  # 最小静息epochs数量，设为None则自动判断
 MODEL = 'transformer'  # 可选: 'simple', 'deepconv', 'eegnet', 'transformer', 'cnnlstm'
 NUM_CHANNELS = 8  # EEG通道数
 NUM_CLASSES = 5  # 分类类别数
-SEQ_LENGTH = 250  # 序列长度
+SEQ_LENGTH = 1500  # 序列长度 - 修改为1500适应6秒数据(250Hz * 6秒)
 
 # 训练参数
 BATCH_SIZE = 10  # 批量大小
 LR = 5e-4  # 学习率
 MAX_EPOCHS = 100  # 最大训练轮数
 EARLY_STOPPING = True  # 是否使用早停
-PATIENCE = 10  # 早停耐心值
+PATIENCE = 100  # 早停耐心值
 USE_GPU = True  # 是否使用GPU
 SEED = 42  # 随机种子，设为None则随机生成
 
@@ -66,7 +72,7 @@ EXP_NAME = f"{MODEL}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"  # 实验名称
 # 类别权重参数 (可选)
 # 格式为字典，例如: {0: 1.0, 1: 1.0, 2: 1.5, 3: 1.0, 4: 0.8}
 # 设为None则根据数据分布自动计算
-CLASS_WEIGHTS = {0: 1.0, 1: 1.0, 2: 1.0, 3: 1.0, 4: 0.2}  # 增加"上"类别的权重
+CLASS_WEIGHTS = {0: 1.0, 1: 1.0, 2: 1.0, 3: 1.0, 4: 0.5}  # 增加"上"类别的权重
 
 #-----------------------------
 # 数据保存控制参数

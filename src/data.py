@@ -5,7 +5,7 @@ EEG数据处理模块 - 用于处理和准备EEG数据集
 - 预处理CSV文件
 - 创建MNE Raw对象
 - 提取事件数据
-- 处理EEG数据并创建切片
+- 处理EEG数据，使用完整的6秒epoch
 - 加载和处理多个CSV文件
 - 创建适用于PyTorch的EEG数据集
 """
@@ -24,9 +24,7 @@ import warnings
 
 # 设置常量
 SAMPLING_FREQ = 250.0  # 采样频率
-EPOCH_DURATION = 6.0   # 每个epoch的秒数
-SEGMENT_DURATION = 1.0  # 每个切片的秒数
-N_SEGMENTS = int(EPOCH_DURATION / SEGMENT_DURATION)  # 每个epoch切成6片
+EPOCH_DURATION = 6.0   # 每个epoch的秒数 - 保持完整的6秒
 
 # 标签映射
 LABEL_MAP = {
@@ -259,7 +257,7 @@ def extract_events_from_dataframe(df, raw):
 
 def process_eeg_data(raw, events, min_rest_epochs=None):
     """
-    处理EEG数据，提取所有类别的epochs并进行一致的切片
+    处理EEG数据，提取所有类别的完整epochs(不再切片)
     
     参数:
         raw: MNE Raw对象
@@ -267,8 +265,8 @@ def process_eeg_data(raw, events, min_rest_epochs=None):
         min_rest_epochs: 最小静息epochs数量，如果为None，则自动判断
         
     返回:
-        X_segments: 形状为(n_segments, n_channels, n_times)的numpy数组
-        y_segments: 形状为(n_segments,)的numpy数组，标签
+        X_epochs: 形状为(n_epochs, n_channels, n_times)的numpy数组
+        y_epochs: 形状为(n_epochs,)的numpy数组，标签
     """
     
     # 提取任务相关epochs（左、右、上、下）
@@ -362,33 +360,14 @@ def process_eeg_data(raw, events, min_rest_epochs=None):
         X_combined = X_task
         y_combined = y_task
     
-    # 对所有epochs进行一致的切片处理
-    all_segments = []
-    all_segment_labels = []
+    # 移除切片处理代码，直接返回完整的epochs数据
+    X_epochs = X_combined
+    y_epochs = y_combined
     
-    samples_per_segment = int(raw.info['sfreq'] * SEGMENT_DURATION)
-    
-    for i in range(len(X_combined)):
-        epoch_data = X_combined[i]
-        label = y_combined[i]
-        
-        for j in range(N_SEGMENTS):
-            start_idx = j * samples_per_segment
-            end_idx = (j + 1) * samples_per_segment
-            
-            if end_idx <= epoch_data.shape[1]:  # 确保不越界
-                segment_data = epoch_data[:, start_idx:end_idx]
-                all_segments.append(segment_data)
-                all_segment_labels.append(label)
-    
-    X_segments = np.array(all_segments)
-    y_segments = np.array(all_segment_labels)
-    
-    print(f"原始epochs总数: {len(X_combined)}")
-    print(f"切片后segments总数: {len(all_segments)}")
-    print(f"切片后数据形状: {X_segments.shape}")
+    print(f"epochs总数: {len(X_epochs)}")
+    print(f"数据形状: {X_epochs.shape}")
 
-    return X_segments, y_segments
+    return X_epochs, y_epochs
 
 def get_eeg_channels(raw):
     """
@@ -421,11 +400,11 @@ def load_all_csv_files(folder_path, pattern="*.csv", label_weights=None, min_res
         min_rest_epochs: 最小静息epochs数量
         
     返回:
-        X_all: 所有切片的特征数据
-        y_all: 所有切片的标签
+        X_all: 所有epochs的特征数据
+        y_all: 所有epochs的标签
     """
-    all_X_segments = []
-    all_y_segments = []
+    all_X_epochs = []
+    all_y_epochs = []
     
     # 获取所有匹配的CSV文件
     csv_files = glob.glob(os.path.join(folder_path, pattern))
@@ -449,12 +428,12 @@ def load_all_csv_files(folder_path, pattern="*.csv", label_weights=None, min_res
             events = extract_events_from_dataframe(df, raw)
             
             if len(events) > 0:
-                # 处理EEG数据并获取切片
-                X_segments, y_segments = process_eeg_data(raw, events, min_rest_epochs)
+                # 处理EEG数据并获取epochs
+                X_epochs, y_epochs = process_eeg_data(raw, events, min_rest_epochs)
                 
                 # 添加到总集合
-                all_X_segments.append(X_segments)
-                all_y_segments.append(y_segments)
+                all_X_epochs.append(X_epochs)
+                all_y_epochs.append(y_epochs)
             else:
                 print(f"文件 {os.path.basename(file_path)} 中未找到有效事件")
         
@@ -462,9 +441,9 @@ def load_all_csv_files(folder_path, pattern="*.csv", label_weights=None, min_res
             print(f"处理文件 {os.path.basename(file_path)} 时出错: {str(e)}")
     
     # 合并所有数据
-    if all_X_segments and all_y_segments:
-        X_all = np.vstack(all_X_segments)
-        y_all = np.concatenate(all_y_segments)
+    if all_X_epochs and all_y_epochs:
+        X_all = np.vstack(all_X_epochs)
+        y_all = np.concatenate(all_y_epochs)
         
         print(f"所有文件处理完成!")
         print(f"总数据形状: {X_all.shape}")
