@@ -1,490 +1,399 @@
-"""
-EEG数据处理模块 - 用于处理和准备EEG数据集
-
-此模块提供了一整套工具，用于处理脑电图(EEG)数据，包括：
-- 预处理CSV文件
-- 创建MNE Raw对象
-- 提取事件数据
-- 处理EEG数据并创建切片
-- 加载和处理多个CSV文件
-- 创建适用于PyTorch的EEG数据集
-"""
-
-from tqdm import tqdm 
-import mne
-import pandas as pd
 import os
 import glob
+import warnings
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
+from tqdm import tqdm
+import mne
 import torch
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
-import warnings
 
-# 设置常量
-SAMPLING_FREQ = 250.0  # 采样频率
-EPOCH_DURATION = 6.0   # 每个epoch的秒数
-SEGMENT_DURATION = 1.0  # 每个切片的秒数
-N_SEGMENTS = int(EPOCH_DURATION / SEGMENT_DURATION)  # 每个epoch切成6片
 
-# 标签映射
-LABEL_MAP = {
-    769: "OVTK_GDF_Left", 
-    770: "OVTK_GDF_Right",
-    780: "OVTK_GDF_Up",
-    774: "OVTK_GDF_Down",
-    32769: "OVTK_StimulationId_ExperimentStart",
-    32775: "OVTK_StimulationId_BaselineStart",
-    33026: "OVTK_GDF_Feedback_Continuous"
-}
 
-# 数值标签映射（用于分类）
-NUMERIC_LABEL_MAP = {
-    769: 0,  # 左
-    770: 1,  # 右
-    780: 2,  # 上
-    774: 3,  # 下
-    999: 4   # 静息
-}
 
-# 标签名称（用于显示）
-LABEL_NAMES = ["左", "右", "上", "下", "静息"]
 
-# EEG通道列
-CHANNEL_COLS = [
-    'Channel 1', 'Channel 2', 'Channel 3', 'Channel 4',
-    'Channel 5', 'Channel 6', 'Channel 7', 'Channel 8'
-]
 
-class LabelWeightAdjuster:
-    """
-    标签权重调整器，用于手动调整特定标签的样本数量
-    """
-    def __init__(self, weights=None):
-        """
-        初始化权重调整器
-        
-        参数:
-            weights: 一个包含5个元素的列表或字典，表示每个标签的权重
-                    如果是列表，顺序对应[左, 右, 上, 下, 静息]
-                    如果是字典，键为标签编号(0-4)，值为权重
-                    默认值为[1.0, 1.0, 1.0, 1.0, 1.0]表示不进行调整
-        """
-        # 设置默认权重
-        self.weights = {i: 1.0 for i in range(5)} 
-        
-        # 处理输入的权重参数
-        if weights is not None:
-            if isinstance(weights, list) and len(weights) == 5:
-                for i, w in enumerate(weights):
-                    self.weights[i] = float(w)
-            elif isinstance(weights, dict):
-                for key, value in weights.items():
-                    if key in range(5):
-                        self.weights[key] = float(value)
-            else:
-                warnings.warn("权重格式不正确，将使用默认权重[1.0, 1.0, 1.0, 1.0, 1.0]")
-    
-    def adjust_samples(self, X, y):
-        """
-        根据权重调整样本数量
-        
-        参数:
-            X: 形状为(n_samples, n_channels, n_times)的numpy数组
-            y: 形状为(n_samples,)的numpy数组，类别标签
-            
-        返回:
-            调整后的X和y
-        """
-        print("调整前样本统计:")
-        for label in range(5):
-            print(f"类别 {label} ({LABEL_NAMES[label]}): {np.sum(y == label)} 样本")
-        
-        # 对每个标签单独处理
-        adjusted_X = []
-        adjusted_y = []
-        
-        for label in range(5):
-            # 获取当前标签的样本
-            mask = (y == label)
-            X_label = X[mask]
-            y_label = y[mask]
-            
-            if len(X_label) == 0:
-                continue
-            
-            weight = self.weights[label]
-            
-            # 如果权重大于1，则通过重复样本来增加数量
-            if weight > 1.0:
-                # 计算需要重复的次数
-                repeat_count = int(weight)
-                remainder = weight - repeat_count
-                
-                # 完整重复
-                for _ in range(repeat_count):
-                    adjusted_X.append(X_label)
-                    adjusted_y.append(y_label)
-                
-                # 处理余数部分
-                if remainder > 0:
-                    samples_to_add = int(len(X_label) * remainder)
-                    if samples_to_add > 0:
-                        indices = np.random.choice(len(X_label), samples_to_add, replace=False)
-                        adjusted_X.append(X_label[indices])
-                        adjusted_y.append(y_label[indices])
-            
-            # 如果权重小于1，则随机选择部分样本
-            elif weight < 1.0:
-                samples_to_keep = max(int(len(X_label) * weight), 1)  # 至少保留一个样本
-                indices = np.random.choice(len(X_label), samples_to_keep, replace=False)
-                adjusted_X.append(X_label[indices])
-                adjusted_y.append(y_label[indices])
-            
-            # 如果权重等于1，则保持不变
-            else:
-                adjusted_X.append(X_label)
-                adjusted_y.append(y_label)
-        
-        # 合并所有标签的样本
-        adjusted_X = np.vstack(adjusted_X) if adjusted_X else np.array([])
-        adjusted_y = np.concatenate(adjusted_y) if adjusted_y else np.array([])
-        
-        print("调整后样本统计:")
-        for label in range(5):
-            print(f"类别 {label} ({LABEL_NAMES[label]}): {np.sum(adjusted_y == label)} 样本")
-        
-        return adjusted_X, adjusted_y
 
-def preprocess_csv(file_path):
-    """
-    预处理单个CSV文件
-    
-    参数:
-        file_path: CSV文件路径
-        
-    返回:
-        预处理后的DataFrame
-    """
-    print(f"正在处理文件: {os.path.basename(file_path)}")
-    
-    # 读取CSV文件
-    df = pd.read_csv(file_path)
-    
-    # 删除不需要的通道（如果存在）
-    columns_to_drop = [col for col in ["Channel 9", "Channel 10", "Channel 11"] if col in df.columns]
-    if columns_to_drop:
-        df.drop(columns=columns_to_drop, inplace=True)
-    
-    # 处理事件ID、日期和持续时间列，保留冒号前的部分
-    def keep_first_part(x):
-        if not isinstance(x, str):
-            x = "" if pd.isna(x) else str(x)
-        return x.split(":")[0] if x else ""
-    
-    for col in ["Event Id", "Event Date", "Event Duration"]:
-        if col in df.columns:
-            df[col] = df[col].fillna("").apply(keep_first_part)
-    
-    # 清空重复事件行
-    if "Event Id" in df.columns and "Event Date" in df.columns and "Event Duration" in df.columns:
-        same_mask = df["Event Id"] == df["Event Id"].shift(-1)
-        rows_to_blank = same_mask.index[same_mask]
-        rows_to_blank = rows_to_blank + 1
-        rows_to_blank = rows_to_blank[rows_to_blank < len(df)]
-        df.loc[rows_to_blank, ["Event Id", "Event Date", "Event Duration"]] = ""
-        
-        # 转换为数值类型
-        df["Event Id"] = pd.to_numeric(df["Event Id"], errors="coerce")
-        df["Event Date"] = pd.to_numeric(df["Event Date"], errors="coerce")
-    
-    return df
 
-def create_raw_from_dataframe(df):
-    """
-    从DataFrame创建MNE Raw对象
+class EEGConfig:
+    """EEG数据处理的配置类"""
     
-    参数:
-        df: 包含EEG数据的DataFrame
-        
-    返回:
-        MNE Raw对象
-    """
-    # 提取EEG数据
-    data = df[CHANNEL_COLS].to_numpy().T
+    # 采样频率
+    SAMPLING_FREQ = 250.0
     
-    # 创建MNE信息对象
-    ch_names = ['ch1', 'ch2', 'ch3', 'ch4', 'ch5', 'ch6', 'ch7', 'ch8']
-    ch_types = ['eeg'] * 8
-    info = mne.create_info(ch_names=ch_names, sfreq=SAMPLING_FREQ, ch_types=ch_types)
-    
-    # 创建Raw对象
-    raw = mne.io.RawArray(data, info)
-    
-    # 应用50Hz陷波滤波器（去除电源线噪声）
-    raw.notch_filter(freqs=[50], picks='eeg')
-    
-    return raw
-
-def extract_events_from_dataframe(df, raw):
-    """
-    从DataFrame提取事件数据
-    
-    参数:
-        df: 包含事件信息的DataFrame
-        raw: MNE Raw对象
-        
-    返回:
-        numpy数组，形状为(n_events, 3)，包含事件信息
-    """
-    events = []
-    
-    if "Event Id" in df.columns and "Event Date" in df.columns:
-        event_indices = df.index[~pd.isna(df["Event Id"]) & (df["Event Id"] != "")]
-        
-        for idx in event_indices:
-            event_id = df.loc[idx, "Event Id"]
-            event_date = df.loc[idx, "Event Date"]
-                
-            # 只保留任务相关事件
-            if event_id in NUMERIC_LABEL_MAP.keys() and event_id != 999:  # 静息状态单独处理
-                # 事件样本点位置
-                sample = int(event_date)
-                
-                # 创建事件元组 [sample, 0, event_id]
-                events.append([sample, 0, int(event_id)])
-    
-    return np.array(events, dtype=int) if events else np.empty((0, 3), dtype=int)
-
-def process_eeg_data(raw, events, min_rest_epochs=None):
-    """
-    处理EEG数据，提取所有类别的epochs并进行一致的切片
-    
-    参数:
-        raw: MNE Raw对象
-        events: 事件数组
-        min_rest_epochs: 最小静息epochs数量，如果为None，则自动判断
-        
-    返回:
-        X_segments: 形状为(n_segments, n_channels, n_times)的numpy数组
-        y_segments: 形状为(n_segments,)的numpy数组，标签
-    """
-    
-    # 提取任务相关epochs（左、右、上、下）
-    task_event_id = {
-        'left': 769,
-        'right': 770,
-        'up': 780,
-        'down': 774
+    # 事件ID到名称的映射
+    LABEL_MAP = {
+        769: "OVTK_GDF_Left", 
+        770: "OVTK_GDF_Right",
+        780: "OVTK_GDF_Up",
+        774: "OVTK_GDF_Down",
+        32769: "OVTK_StimulationId_ExperimentStart",
+        32775: "OVTK_StimulationId_BaselineStart",
+        33026: "OVTK_GDF_Feedback_Continuous"
     }
     
-    task_epochs = mne.Epochs(
-        raw,
-        events=events,
-        event_id=task_event_id,
-        tmin=0.0,
-        tmax=EPOCH_DURATION,
-        baseline=None,
-        picks='eeg',
-        preload=True
-    )
+    # 定义静息状态的事件ID
+    REST_STATE_EVENT_ID = 999
     
-    X_task = (task_epochs.get_data() * 1e-6).astype(np.float32)
-    y_task = np.array([NUMERIC_LABEL_MAP[val] for val in task_epochs.events[:, 2]], dtype=np.int64)
+    # 事件ID到数值标签的映射
+    NUMERIC_LABEL_MAP = {
+        769: 0,  # 左
+        770: 1,  # 右
+        780: 2,  # 上
+        774: 3,  # 下
+    }
     
-    print(f"任务相关epochs数量: {len(task_epochs)}")
+    # 静息状态标签
+    REST_STATE_LABEL = 4
     
-    # 标记已被任务epochs占用的样本点
-    used_samples = np.zeros(len(raw.times), dtype=bool)
+    # 定义标签名称（用于输出）
+    LABEL_NAMES = ["左", "右", "上", "下", "静息"]
     
-    for idx in range(len(task_epochs)):
-        event_sample = task_epochs.events[idx, 0]
-        start_sample = event_sample
-        end_sample = start_sample + int(EPOCH_DURATION * raw.info['sfreq'])
-        if end_sample <= len(used_samples):
-            used_samples[start_sample:end_sample] = True
+    # 通道列名
+    CHANNEL_COLS = [
+        'Channel 1', 'Channel 2', 'Channel 3', 'Channel 4',
+        'Channel 5', 'Channel 6', 'Channel 7', 'Channel 8'
+    ]
     
-    # 寻找未被占用的样本点作为静息epochs
-    rest_events = []
-    rest_length = int(EPOCH_DURATION * raw.info['sfreq'])
+    # 滤波器参数
+    FILTER_L_FREQ = 0  # 低频截止，Hz
+    FILTER_H_FREQ = 60  # 高频截止，Hz
+    NOTCH_FREQ = 50  # 陷波频率（电源线），Hz
+    NUM_CHANNELS = 8
+    # 窗口参数默认值
+    DEFAULT_WINDOW_DURATION = 2.0  # 秒
+    DEFAULT_WINDOW_STEP = 0.2  # 秒
+    DEFAULT_STATE_DURATION = 6.0  # 秒
+
+
+class EEGPreprocessor:
+    """EEG数据预处理类"""
     
-    # 确定需要提取的静息epochs数量
-    if min_rest_epochs is None:
-        # 默认尝试提取与任务epochs数量相当的静息epochs
-        target_rest_epochs = len(task_epochs) // 4  # 每种任务类型的1/4
-    else:
-        target_rest_epochs = min_rest_epochs
+    def __init__(self, config=None):
+        """
+        初始化预处理器
+        
+        参数:
+            config: 配置对象，默认使用EEGConfig
+        """
+        self.config = config or EEGConfig()
     
-    i = 0
-    rest_count = 0
-    while i < len(used_samples) and rest_count < target_rest_epochs:
-        if not used_samples[i]:
-            start_sample = i
-            end_sample = min(start_sample + rest_length, len(used_samples))
+    def preprocess_csv(self, file_path):
+        """
+        预处理单个CSV文件
+        
+        参数:
+            file_path: CSV文件路径
             
-            # 确保整个区间没有被占用
-            if end_sample - start_sample >= rest_length and not any(used_samples[start_sample:end_sample]):
-                rest_events.append([start_sample, 0, 999])  # 999为静息状态代码
-                rest_count += 1
-                i = end_sample
+        返回:
+            预处理后的DataFrame
+        """
+        # 读取CSV文件
+        df = pd.read_csv(file_path)
+        
+        # 删除不需要的通道（如果存在）
+        columns_to_drop = [col for col in ["Channel 9", "Channel 10", "Channel 11"] if col in df.columns]
+        if columns_to_drop:
+            df.drop(columns=columns_to_drop, inplace=True)
+        
+        # 处理事件ID、日期和持续时间列，保留冒号前的部分
+        def keep_first_part(x):
+            try:
+                if not isinstance(x, str):
+                    x = "" if pd.isna(x) else str(x)
+                return x.split(":")[0] if x and ":" in x else x
+            except Exception:
+                return "" if pd.isna(x) else str(x)
+        
+        for col in ["Event Id", "Event Date", "Event Duration"]:
+            if col in df.columns:
+                df[col] = df[col].fillna("").apply(keep_first_part)
+        
+        # 清空重复事件行
+        if "Event Id" in df.columns and "Event Date" in df.columns and "Event Duration" in df.columns:
+            try:
+                same_mask = df["Event Id"] == df["Event Id"].shift(-1)
+                rows_to_blank = same_mask.index[same_mask]
+                rows_to_blank = rows_to_blank + 1
+                rows_to_blank = rows_to_blank[rows_to_blank < len(df)]
+                df.loc[rows_to_blank, ["Event Id", "Event Date", "Event Duration"]] = ""
+            except Exception as e:
+                print(f"处理重复事件行时出错: {str(e)}")
+            
+            try:
+                df["Event Id"] = pd.to_numeric(df["Event Id"], errors="coerce")
+                df["Event Date"] = pd.to_numeric(df["Event Date"], errors="coerce")
+            except Exception as e:
+                print(f"转换事件列为数值类型时出错: {str(e)}")
+        
+        return df
+    
+    def create_raw_from_dataframe(self, df):
+        """
+        从DataFrame创建MNE Raw对象
+        
+        参数:
+            df: 包含EEG数据的DataFrame
+            
+        返回:
+            MNE Raw对象
+        """
+        # 提取EEG数据
+        data = df[self.config.CHANNEL_COLS].to_numpy().T
+        
+        # 创建MNE信息对象
+        ch_names = ['ch1', 'ch2', 'ch3', 'ch4', 'ch5', 'ch6', 'ch7', 'ch8']
+        ch_types = ['eeg'] * 8
+        info = mne.create_info(ch_names=ch_names, sfreq=self.config.SAMPLING_FREQ, ch_types=ch_types)
+        
+        # 创建Raw对象
+        raw = mne.io.RawArray(data, info)
+        
+        # 应用陷波滤波器（去除电源线噪声）
+        raw.notch_filter(freqs=[self.config.NOTCH_FREQ], picks='eeg')
+        
+        return raw
+    
+    def extract_events_from_dataframe(self, df, raw):
+        """
+        从DataFrame提取事件数据
+        
+        参数:
+            df: 包含事件信息的DataFrame
+            raw: MNE Raw对象
+            
+        返回:
+            numpy数组，形状为(n_events, 3)，包含事件信息
+        """
+        events = []
+        
+        if "Event Id" in df.columns and "Event Date" in df.columns:
+            # 获取有效事件的索引
+            event_indices = df.index[~pd.isna(df["Event Id"]) & (df["Event Id"] != "")]
+            
+            for idx in event_indices:
+                try:
+                    event_id = df.loc[idx, "Event Id"]
+                    event_date = df.loc[idx, "Event Date"]
+                        
+                    # 只保留任务相关事件（包括静息状态）
+                    if event_id in self.config.NUMERIC_LABEL_MAP.keys() or event_id == self.config.REST_STATE_EVENT_ID:
+                        # 事件样本点位置
+                        sample = int(float(event_date) * self.config.SAMPLING_FREQ)
+                        
+                        # 创建事件元组 [sample, 0, event_id]
+                        events.append([sample, 0, int(event_id)])
+                except Exception as e:
+                    print(f"处理事件索引 {idx} 时出错: {str(e)}")
+        
+        return np.array(events, dtype=int) if events else np.empty((0, 3), dtype=int)
+    
+    def create_sliding_window_with_labels(self, raw, events, window_duration=None, window_step=None, state_duration=6):
+        """
+        使用滑动窗口切片EEG数据，并根据窗口是否与状态持续段重叠来标记
+
+        参数:
+            raw: MNE Raw对象
+            events: 事件数组，形状为(n_events, 3)
+            window_duration: 滑动窗口大小，单位为秒
+            window_step: 滑动窗口步长，单位为秒
+            state_duration: 从事件标记点开始的状态持续时间，单位为秒
+            
+        返回:
+            X_windows: 窗口数据，形状为(n_windows, n_channels, n_times)
+            y_labels: 窗口标签，形状为(n_windows,)
+        """
+        # 使用默认值（如果未指定）
+        window_duration = window_duration or self.config.DEFAULT_WINDOW_DURATION
+        window_step = window_step or self.config.DEFAULT_WINDOW_STEP
+        state_duration = state_duration or self.config.DEFAULT_STATE_DURATION
+        
+        # 获取采样率
+        sfreq = raw.info['sfreq']
+        n_channels = len(raw.ch_names)
+        
+        # 计算窗口和状态持续时间的样本点数
+        window_samples = int(window_duration * sfreq)
+        step_samples = int(window_step * sfreq)
+        state_samples = int(state_duration * sfreq)
+        
+        # 创建状态区间标记数组 (0表示未标记的背景状态，不同于REST_STATE_LABEL)
+        n_samples = len(raw.times)
+        state_markers = np.zeros(n_samples, dtype=np.int64)
+
+        #DEBUG用
+        print("处理的总事件数:", len(events))
+        processed_count = 0
+        #DEBUG用
+
+        # 标记所有状态持续段
+        for event in events:
+            event_sample, _, event_id = event
+    
+            # 处理任务相关事件
+            if event_id in self.config.NUMERIC_LABEL_MAP:
+        # 计算状态持续段开始和结束点
+                start_sample = event_sample
+                end_sample = min(start_sample + state_samples, n_samples)
+        
+        # 用事件对应的数字标签标记该区间
+                label = self.config.NUMERIC_LABEL_MAP[event_id]
+                state_markers[start_sample:end_sample] = label
+                processed_count += 1
+        # 提取原始EEG数据
+        eeg_data = raw.get_data() * 1e-6  # 转换为μV
+        
+        # 创建滑动窗口
+        X_windows = []
+        y_labels = []
+        
+        # 遍历所有可能的窗口位置
+        for start_sample in range(0, n_samples - window_samples + 1, step_samples):
+            end_sample = start_sample + window_samples
+            
+            # 提取当前窗口的数据
+            window_data = eeg_data[:, start_sample:end_sample]
+            
+            # 确定窗口标签
+            window_states = state_markers[start_sample:end_sample]
+            unique_states, state_counts = np.unique(window_states, return_counts=True)
+            
+            # 如果窗口中有标记的状态，选择占比最大的状态作为标签
+            # 排除未标记状态(0)，除非所有状态都是未标记状态
+            valid_states = unique_states[unique_states != 0] if 0 in unique_states else unique_states
+            valid_counts = state_counts[unique_states != 0] if 0 in unique_states else state_counts
+            
+            if len(valid_states) > 0:
+                # 找出样本点数量最多的状态
+                max_idx = np.argmax(valid_counts)
+                label = valid_states[max_idx]
             else:
-                i += 1
-        else:
-            i += 1
-    
-    rest_events = np.array(rest_events, dtype=int) if rest_events else np.empty((0, 3), dtype=int)
-    
-    # 创建静息epochs
-    if len(rest_events) > 0:
-        rest_event_id = {'rest': 999}
-        rest_epochs = mne.Epochs(
-            raw,
-            events=rest_events,
-            event_id=rest_event_id,
-            tmin=0.0,
-            tmax=EPOCH_DURATION,
-            baseline=None,
-            picks='eeg',
-            preload=True
-        )
-        
-        X_rest = (rest_epochs.get_data() * 1e-6).astype(np.float32)
-        y_rest = np.ones(len(rest_epochs), dtype=np.int64) * NUMERIC_LABEL_MAP[999]
-        
-        print(f"静息epochs数量: {len(rest_epochs)}")
-        
-        # 合并任务和静息数据
-        X_combined = np.vstack([X_task, X_rest])
-        y_combined = np.concatenate([y_task, y_rest])
-    else:
-        print("未找到静息epochs")
-        X_combined = X_task
-        y_combined = y_task
-    
-    # 对所有epochs进行一致的切片处理
-    all_segments = []
-    all_segment_labels = []
-    
-    samples_per_segment = int(raw.info['sfreq'] * SEGMENT_DURATION)
-    
-    for i in range(len(X_combined)):
-        epoch_data = X_combined[i]
-        label = y_combined[i]
-        
-        for j in range(N_SEGMENTS):
-            start_idx = j * samples_per_segment
-            end_idx = (j + 1) * samples_per_segment
+                # 所有状态都是未标记状态，将其视为静息
+                label = self.config.REST_STATE_LABEL
             
-            if end_idx <= epoch_data.shape[1]:  # 确保不越界
-                segment_data = epoch_data[:, start_idx:end_idx]
-                all_segments.append(segment_data)
-                all_segment_labels.append(label)
-    
-    X_segments = np.array(all_segments)
-    y_segments = np.array(all_segment_labels)
-    
-    print(f"原始epochs总数: {len(X_combined)}")
-    print(f"切片后segments总数: {len(all_segments)}")
-    print(f"切片后数据形状: {X_segments.shape}")
-
-    return X_segments, y_segments
-
-def get_eeg_channels(raw):
-    """
-    获取EEG通道数
-    
-    参数:
-        raw: MNE Raw对象
+            X_windows.append(window_data)
+            y_labels.append(label)
         
-    返回:
-        EEG通道数
-    """
-    eeg_channel_inds = mne.pick_types(
-        raw.info,
-        meg=False,
-        eeg=True,
-        stim=False,
-        eog=False,
-        exclude='bads',
-    )
-    return len(eeg_channel_inds)
-
-def load_all_csv_files(folder_path, pattern="*.csv", label_weights=None, min_rest_epochs=None):
-    """
-    加载文件夹中所有符合模式的CSV文件，并处理它们
-    
-    参数:
-        folder_path: 包含CSV文件的文件夹路径
-        pattern: 文件匹配模式，默认为"*.csv"
-        label_weights: 标签权重，用于调整样本数量
-        min_rest_epochs: 最小静息epochs数量
+        # 转换为numpy数组
+        X_windows = np.array(X_windows, dtype=np.float32)
+        y_labels = np.array(y_labels, dtype=np.int64)
         
-    返回:
-        X_all: 所有切片的特征数据
-        y_all: 所有切片的标签
-    """
-    all_X_segments = []
-    all_y_segments = []
+        print(f"创建了 {len(X_windows)} 个滑动窗口")
+        print(f"窗口数据形状: {X_windows.shape}")
+        
+        # 输出各类别数量
+        for i in range(5):  # 5个类别：0-左, 1-右, 2-上, 3-下, 4-静息
+            count = np.sum(y_labels == i)
+            print(f"类别 {i} ({self.config.LABEL_NAMES[i]}): {count} 窗口")
+        
+        return X_windows, y_labels
     
-    # 获取所有匹配的CSV文件
-    csv_files = glob.glob(os.path.join(folder_path, pattern))
-    
-    if not csv_files:
-        print(f"在 {folder_path} 中未找到符合 {pattern} 的CSV文件")
-        return None, None
-    
-    print(f"找到 {len(csv_files)} 个CSV文件")
-    
-    # 处理每个CSV文件
-    for file_path in tqdm(csv_files, desc="处理文件"):
+    def process_file(self, file_path, window_duration=None, window_step=None, state_duration=None):
+        """
+        处理单个EEG文件
+        
+        参数:
+            file_path: CSV文件路径
+            window_duration: 滑动窗口大小，单位为秒
+            window_step: 滑动窗口步长，单位为秒
+            state_duration: 从事件标记点开始的状态持续时间，单位为秒
+            
+        返回:
+            X_windows: 窗口数据，形状为(n_windows, n_channels, n_times)
+            y_labels: 窗口标签，形状为(n_windows,)
+        """
         try:
             # 预处理CSV
-            df = preprocess_csv(file_path)
+            df = self.preprocess_csv(file_path)
             
             # 创建Raw对象
-            raw = create_raw_from_dataframe(df)
+            raw = self.create_raw_from_dataframe(df)
+            
+            # 应用带通滤波器
+            raw.filter(l_freq=self.config.FILTER_L_FREQ, h_freq=self.config.FILTER_H_FREQ, picks='eeg')
             
             # 提取事件
-            events = extract_events_from_dataframe(df, raw)
+            events = self.extract_events_from_dataframe(df, raw)
             
             if len(events) > 0:
-                # 处理EEG数据并获取切片
-                X_segments, y_segments = process_eeg_data(raw, events, min_rest_epochs)
+                # 使用滑动窗口切片并标记
+                X_windows, y_labels = self.create_sliding_window_with_labels(
+                    raw, events, 
+                    window_duration=window_duration, 
+                    window_step=window_step,
+                    state_duration=state_duration
+                )
                 
-                # 添加到总集合
-                all_X_segments.append(X_segments)
-                all_y_segments.append(y_segments)
+                return X_windows, y_labels
             else:
                 print(f"文件 {os.path.basename(file_path)} 中未找到有效事件")
+                return None, None
         
         except Exception as e:
             print(f"处理文件 {os.path.basename(file_path)} 时出错: {str(e)}")
+            return None, None
     
-    # 合并所有数据
-    if all_X_segments and all_y_segments:
-        X_all = np.vstack(all_X_segments)
-        y_all = np.concatenate(all_y_segments)
+    def process_folder(self, folder_path, window_duration=None, window_step=None, state_duration=None):
+        """
+        处理文件夹中的所有EEG文件
         
-        print(f"所有文件处理完成!")
-        print(f"总数据形状: {X_all.shape}")
-        print(f"总标签形状: {y_all.shape}")
+        参数:
+            folder_path: 包含CSV文件的文件夹路径
+            window_duration: 滑动窗口大小，单位为秒
+            window_step: 滑动窗口步长，单位为秒
+            state_duration: 从事件标记点开始的状态持续时间，单位为秒
+            
+        返回:
+            X_all: 所有窗口数据，形状为(n_windows_total, n_channels, n_times)
+            y_all: 所有窗口标签，形状为(n_windows_total,)
+        """
+        # 获取所有匹配的CSV文件
+        csv_files = glob.glob(os.path.join(folder_path, "*.csv"))
         
-        # 显示每个类别的样本计数
-        for i in range(5):
-            count = np.sum(y_all == i)
-            percent = count / len(y_all) * 100
-            print(f"类别 {i} ({LABEL_NAMES[i]}): {count} 样本 ({percent:.2f}%)")
+        if not csv_files:
+            print(f"在 {folder_path} 中未找到CSV文件")
+            return None, None
         
-        # 应用标签权重调整
-        if label_weights is not None:
-            weight_adjuster = LabelWeightAdjuster(label_weights)
-            X_all, y_all = weight_adjuster.adjust_samples(X_all, y_all)
+        print(f"找到 {len(csv_files)} 个CSV文件")
         
-        return X_all, y_all
-    else:
-        print("未能从任何文件中提取到有效数据")
-        return None, None
+        all_X_windows = []
+        all_y_labels = []
+        
+        # 处理每个CSV文件
+        for file_path in tqdm(csv_files, desc="处理文件"):
+            X_windows, y_labels = self.process_file(
+                file_path, 
+                window_duration=window_duration, 
+                window_step=window_step,
+                state_duration=state_duration
+            )
+            
+            if X_windows is not None and y_labels is not None:
+                all_X_windows.append(X_windows)
+                all_y_labels.append(y_labels)
+        
+        # 合并所有数据
+        if all_X_windows and all_y_labels:
+            X_all = np.vstack(all_X_windows)
+            y_all = np.concatenate(all_y_labels)
+            
+            print(f"所有文件处理完成!")
+            print(f"总数据形状: {X_all.shape}")
+            print(f"总标签形状: {y_all.shape}")
+            
+            # 显示每个类别的样本计数
+            for i in range(5):  # 5个类别
+                count = np.sum(y_all == i)
+                percent = count / len(y_all) * 100
+                print(f"类别 {i} ({self.config.LABEL_NAMES[i]}): {count} 样本 ({percent:.2f}%)")
+            
+            return X_all, y_all
+        else:
+            print("未能从任何文件中提取到有效数据")
+            return None, None
+
 
 class EEGDataset(Dataset):
     """
@@ -506,6 +415,7 @@ class EEGDataset(Dataset):
         """
         super().__init__()
         self.__split = None
+        self.config = EEGConfig()
         
         # 确保比例和为1
         assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-10, "数据集比例必须和为1"
@@ -537,16 +447,20 @@ class EEGDataset(Dataset):
                 'y': y_test,
             }
             
+            # 设置默认拆分为训练集
+            self.__split = "train"
+            
             # 打印每个集合的样本数和类别分布
             print(f"训练集大小: {len(X_train)} 样本")
             print(f"验证集大小: {len(X_val)} 样本")
             print(f"测试集大小: {len(X_test)} 样本")
             
             for i in range(5):  # 五类: 0-左, 1-右, 2-上, 3-下, 4-静息
-                print(f"类别 {i} ({LABEL_NAMES[i]}) 分布: 训练集 {sum(y_train == i)}, "
+                print(f"类别 {i} ({self.config.LABEL_NAMES[i]}) 分布: 训练集 {sum(y_train == i)}, "
                       f"验证集 {sum(y_val == i)}, 测试集 {sum(y_test == i)}")
         else:
             self.inference_ds = {'x': x}
+            self.__split = "inference"
             print(f"推理数据集大小: {len(x)} 样本")
 
     def __len__(self):
@@ -565,6 +479,10 @@ class EEGDataset(Dataset):
 
     def split(self, __split):
         """设置当前使用的数据集拆分"""
+        assert __split in ["train", "val", "test", "inference"], f"未知的数据集拆分: {__split}"
+        if __split == "inference" and not hasattr(self, "inference_ds"):
+            raise ValueError("当前数据集不支持推理模式，请以inference=True初始化")
+            
         self.__split = __split
         return self
 
@@ -604,37 +522,80 @@ class EEGDataset(Dataset):
         return train_loader, val_loader, test_loader
 
 
-
-'''
-from data import load_all_csv_files, EEGDataset
-
-# 设置标签权重（可选）
-label_weights = {0: 1.0, 1: 1.0, 2: 1.5, 3: 1.0, 4: 1.0}  # 增加"上"类别的权重
-
-# 加载数据
-data_folder = "你的数据文件夹路径"
-X_all, y_all = load_all_csv_files(data_folder, label_weights=label_weights)
-
-# 创建数据集
-eeg_dataset = EEGDataset(X_all, y_all)
-
-# 获取数据加载器
-train_loader, val_loader, test_loader = eeg_dataset.get_loaders(batch_size=64)
-'''
-
-
-
-if __name__ == "__main__":
-    # 设置标签权重 (示例: 增加"上"类别的权重为1.5)
-    label_weights = {0: 1.0, 1: 1.0, 2: 1.5, 3: 1.0, 4: 1.0}
-    
-    # 加载数据
-    data_folder = "eeg/OpenViBE/data"
-    X_all, y_all = load_all_csv_files(data_folder, label_weights=label_weights)
-    
-    if X_all is not None and y_all is not None:
-        # 创建数据集
-        eeg_dataset = EEGDataset(X_all, y_all)
+class EEGProcessor:
+    """
+    EEG数据处理的主类，集成预处理和数据集创建
+    """
+    def __init__(self, config=None):
+        """
+        初始化EEG处理器
         
-        # 获取数据加载器
-        train_loader, val_loader, test_loader = eeg_dataset.get_loaders(batch_size=64)
+        参数:
+            config: 配置对象，默认使用EEGConfig
+        """
+        self.config = config or EEGConfig()
+        self.preprocessor = EEGPreprocessor(config=self.config)
+    
+    def prepare_dataset(self, folder_path, window_duration=None, window_step=None, state_duration=None, 
+                    train_ratio=0.8, val_ratio=0.1, test_ratio=0.1, random_state=42):
+        """
+        准备用于训练的EEG数据集
+        
+        参数:
+            folder_path: 包含CSV文件的文件夹路径
+            window_duration: 滑动窗口大小，单位为秒
+            window_step: 滑动窗口步长，单位为秒
+            state_duration: 从事件标记点开始的状态持续时间，单位为秒
+            train_ratio: 训练集比例
+            val_ratio: 验证集比例
+            test_ratio: 测试集比例
+            random_state: 随机种子，用于数据集拆分
+            
+        返回:
+            EEGDataset对象
+        """
+        # 处理文件夹中的所有EEG文件
+        X_all, y_all = self.preprocessor.process_folder(
+            folder_path,
+            window_duration=window_duration,
+            window_step=window_step,
+            state_duration=state_duration
+        )
+        
+        if X_all is not None and y_all is not None:
+            # 减少静息样本到10%
+            REST_STATE_LABEL = 4  # 静息状态标签
+            rest_mask = y_all == REST_STATE_LABEL
+            rest_indices = np.where(rest_mask)[0]
+            non_rest_indices = np.where(~rest_mask)[0]
+            
+            # 计算要保留的静息样本数量（10%）
+            keep_rest_count = int(len(rest_indices) * 0.15)
+            
+            # 随机选择要保留的静息样本
+            if keep_rest_count > 0:
+                # 设置随机种子确保可重复性
+                np.random.seed(random_state)
+                keep_rest_indices = np.random.choice(rest_indices, size=keep_rest_count, replace=False)
+                keep_indices = np.concatenate([non_rest_indices, keep_rest_indices])
+                
+                # 减少数据集
+                X_all = X_all[keep_indices]
+                y_all = y_all[keep_indices]
+                
+                print(f"静息样本减少: 从 {len(rest_indices)} 减少到 {keep_rest_count} (10%)")
+                print(f"总样本量: 从 {len(rest_mask)} 减少到 {len(y_all)}")
+            
+            # 创建数据集
+            eeg_dataset = EEGDataset(
+                x=X_all, 
+                y=y_all, 
+                inference=False,
+                train_ratio=train_ratio, 
+                val_ratio=val_ratio, 
+                test_ratio=test_ratio, 
+                random_state=random_state
+            )
+            return eeg_dataset
+        else:
+            return None

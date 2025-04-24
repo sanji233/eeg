@@ -1,7 +1,7 @@
 """
 EEG训练模块 - 用于训练、验证和测试EEG分类模型
 
-此模块提供了训练EEG分类模型所需的工具，包括：
+此模块提供了训练EEG分类模型所需的核心工具，包括：
 - 移动平均计算器（用于记录损失和准确率）
 - 模型封装器（PyTorch Lightning模块）
 - 训练和评估功能
@@ -20,6 +20,7 @@ from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint, Learning
 from torchmetrics.classification import Accuracy, MulticlassF1Score, ConfusionMatrix
 from tqdm import tqdm
 import os
+import json
 
 try:
     from google.colab.patches import cv2_imshow
@@ -33,43 +34,22 @@ except ImportError:
         plt.axis('off')
         plt.show()
 
+
 class AvgMeter(object):
-    """
-    移动平均计算器，用于记录和计算最近N个值的平均值
-    """
+    """移动平均计算器，用于记录和计算最近N个值的平均值"""
     def __init__(self, num=40):
-        """
-        初始化移动平均计算器
-        
-        参数:
-            num: 计算平均值时使用的最近值的数量
-        """
         self.num = num
         self.reset()
 
     def reset(self):
-        """重置计算器，清空所有记录的值"""
         self.losses = []
 
     def update(self, val):
-        """
-        添加新值到记录中
-        
-        参数:
-            val: 要添加的新值
-        """
         self.losses.append(val)
 
     def show(self):
-        """
-        计算并返回最近num个值的平均值
-        
-        返回:
-            最近num个值的平均值
-        """
         if not self.losses:
             return torch.tensor(0.0)
-            
         out = torch.mean(
             torch.stack(
                 self.losses[np.maximum(len(self.losses)-self.num, 0):]
@@ -77,10 +57,30 @@ class AvgMeter(object):
         )
         return out
 
+
+class EEGFocalLoss(nn.Module):
+    """Focal Loss 用于处理类别不平衡问题"""
+    def __init__(self, alpha=None, gamma=2.0, reduction='mean'):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, inputs, targets):
+        ce_loss = F.cross_entropy(inputs, targets, reduction='none', weight=self.alpha)
+        p_t = torch.exp(-ce_loss)
+        loss = (1 - p_t) ** self.gamma * ce_loss
+
+        if self.reduction == 'mean':
+            return loss.mean()
+        elif self.reduction == 'sum':
+            return loss.sum()
+        else:
+            return loss
+
+
 class ModelWrapper(L.LightningModule):
-    """
-    模型封装器，用于训练、验证和测试EEG分类模型
-    """
+    """模型封装器，用于训练、验证和测试EEG分类模型"""
     def __init__(self, 
                  arch, 
                  dataset, 
@@ -88,19 +88,11 @@ class ModelWrapper(L.LightningModule):
                  lr=0.001, 
                  max_epoch=100, 
                  num_classes=5,
-                 class_weights=None):
-        """
-        初始化模型封装器
-        
-        参数:
-            arch: 模型架构（nn.Module的子类实例）
-            dataset: 数据集（应该是EEGDataset的实例）
-            batch_size: 批量大小
-            lr: 学习率
-            max_epoch: 最大训练轮数
-            num_classes: 分类类别数
-            class_weights: 类别权重（用于处理类别不平衡）
-        """
+                 class_weights=None,
+                 label_names=None,
+                 use_focal_loss=False,
+                 gamma=2.0,
+                 weight_decay=1e-4):
         super().__init__()
 
         self.arch = arch
@@ -110,6 +102,10 @@ class ModelWrapper(L.LightningModule):
         self.max_epoch = max_epoch
         self.num_classes = num_classes
         self.class_weights = class_weights
+        self.label_names = label_names or [f"类别 {i}" for i in range(num_classes)]
+        self.use_focal_loss = use_focal_loss
+        self.gamma = gamma
+        self.weight_decay = weight_decay
         
         # 设置任务类型（多分类或二分类）
         if num_classes > 2:
@@ -123,7 +119,7 @@ class ModelWrapper(L.LightningModule):
         self.train_accuracy = Accuracy(task=self.task, **self.num_classes_arg)
         self.val_accuracy = Accuracy(task=self.task, **self.num_classes_arg)
         self.test_accuracy = Accuracy(task=self.task, **self.num_classes_arg)
-        self.test_f1 = MulticlassF1Score(num_classes=num_classes)
+        self.test_f1 = MulticlassF1Score(num_classes=num_classes, average='macro')
         self.test_confusion = ConfusionMatrix(task=self.task, **self.num_classes_arg)
 
         # 关闭自动优化，使用手动优化
@@ -143,49 +139,20 @@ class ModelWrapper(L.LightningModule):
         self.best_val_acc = 0.0
 
     def forward(self, x):
-        """
-        前向传播
-        
-        参数:
-            x: 输入数据
-            
-        返回:
-            模型输出
-        """
+        """前向传播"""
         return self.arch(x)
 
     def training_step(self, batch, batch_nb):
-        """
-        训练步骤
-
-        参数:
-            batch: 当前批次的数据
-            batch_nb: 批次索引
-        """
+        """训练步骤"""
         x, y = batch
         y_hat = self(x)
-    
-    # 处理二分类和多分类情况
-        if self.num_classes == 2:
-        # 二分类
-            y_onehot = F.one_hot(y, num_classes=2).float()
-            loss = F.binary_cross_entropy_with_logits(y_hat, y_onehot)
-        else:
-        # 多分类 
-            if self.class_weights is not None:
-            # 修改这里，将字典转换为适当的权重列表
-                if isinstance(self.class_weights, dict):
-                # 确保权重顺序正确
-                    weight_list = [self.class_weights.get(i, 1.0) for i in range(self.num_classes)]
-                    weights = torch.tensor(weight_list, dtype=torch.float32).to(self.device)
-                else:
-                    weights = torch.tensor(self.class_weights, dtype=torch.float32).to(self.device)
-                loss = F.cross_entropy(y_hat, y, weight=weights)
-            else:
-                oss = F.cross_entropy(y_hat, y)
-
-
         
+        # 计算损失
+        if self.use_focal_loss:
+            loss = self._compute_focal_loss(y_hat, y)
+        else:
+            loss = self._compute_standard_loss(y_hat, y)
+    
         # 计算准确率
         self.train_accuracy.update(y_hat, y)
         acc = self.train_accuracy.compute().data.cpu()
@@ -204,6 +171,41 @@ class ModelWrapper(L.LightningModule):
         self.log("train_loss", loss, prog_bar=True)
         self.log("train_acc", acc, prog_bar=True)
 
+    def _compute_standard_loss(self, y_hat, y):
+        """计算标准交叉熵损失"""
+        if self.num_classes == 2:
+            # 二分类
+            y_onehot = F.one_hot(y, num_classes=2).float()
+            loss = F.binary_cross_entropy_with_logits(y_hat, y_onehot)
+        else:
+            # 多分类
+            if self.class_weights is not None:
+                # 确保权重格式正确
+                if isinstance(self.class_weights, dict):
+                    # 从字典中提取权重列表
+                    weight_list = [self.class_weights.get(i, 1.0) for i in range(self.num_classes)]
+                    weights = torch.tensor(weight_list, dtype=torch.float32).to(self.device)
+                else:
+                    # 直接使用权重列表
+                    weights = torch.tensor(self.class_weights, dtype=torch.float32).to(self.device)
+                loss = F.cross_entropy(y_hat, y, weight=weights)
+            else:
+                loss = F.cross_entropy(y_hat, y)
+        return loss
+    
+    def _compute_focal_loss(self, y_hat, y):
+        """计算Focal Loss"""
+        weights = None
+        if self.class_weights is not None:
+            if isinstance(self.class_weights, dict):
+                weights = torch.tensor([self.class_weights.get(i, 1.0) for i in range(self.num_classes)])
+            else:
+                weights = torch.tensor(self.class_weights)
+            weights = weights.to(self.device)
+            
+        focal_loss = EEGFocalLoss(alpha=weights, gamma=self.gamma)
+        return focal_loss(y_hat, y)
+
     def on_train_epoch_end(self):
         """每个训练轮结束时的操作"""
         # 更新学习率
@@ -218,24 +220,15 @@ class ModelWrapper(L.LightningModule):
         self.train_acc_recorder = AvgMeter()
 
     def validation_step(self, batch, batch_nb):
-        """
-        验证步骤
-        
-        参数:
-            batch: 当前批次的数据
-            batch_nb: 批次索引
-        """
+        """验证步骤"""
         x, y = batch
         y_hat = self(x)
         
-        # 处理二分类和多分类情况
-        if self.num_classes == 2:
-            # 二分类
-            y_onehot = F.one_hot(y, num_classes=2).float()
-            loss = F.binary_cross_entropy_with_logits(y_hat, y_onehot)
+        # 计算损失
+        if self.use_focal_loss:
+            loss = self._compute_focal_loss(y_hat, y)
         else:
-            # 多分类
-            loss = F.cross_entropy(y_hat, y)
+            loss = self._compute_standard_loss(y_hat, y)
         
         # 计算准确率
         self.val_accuracy.update(y_hat, y)
@@ -260,31 +253,21 @@ class ModelWrapper(L.LightningModule):
         self.val_acc.append(val_acc)
         self.val_acc_recorder = AvgMeter()
     
-    # 记录最佳验证精度 - 将 NumPy 数组转换为浮点数
+        # 记录最佳验证精度
         if val_acc > self.best_val_acc:
             self.best_val_acc = val_acc
-            # 修改这一行，确保 best_val_acc 是浮点数
             self.log("best_val_acc", float(self.best_val_acc))
 
     def test_step(self, batch, batch_nb):
-        """
-        测试步骤
-        
-        参数:
-            batch: 当前批次的数据
-            batch_nb: 批次索引
-        """
+        """测试步骤"""
         x, y = batch
         y_hat = self(x)
         
-        # 处理二分类和多分类情况
-        if self.num_classes == 2:
-            # 二分类
-            y_onehot = F.one_hot(y, num_classes=2).float()
-            loss = F.binary_cross_entropy_with_logits(y_hat, y_onehot)
+        # 计算损失
+        if self.use_focal_loss:
+            loss = self._compute_focal_loss(y_hat, y)
         else:
-            # 多分类
-            loss = F.cross_entropy(y_hat, y)
+            loss = self._compute_standard_loss(y_hat, y)
         
         # 更新评估指标
         self.test_accuracy.update(y_hat, y)
@@ -313,7 +296,7 @@ class ModelWrapper(L.LightningModule):
         plt.title('混淆矩阵')
         plt.colorbar()
         
-        classes = [f"类别 {i}" for i in range(self.num_classes)]
+        classes = self.label_names
         tick_marks = np.arange(len(classes))
         plt.xticks(tick_marks, classes, rotation=45)
         plt.yticks(tick_marks, classes)
@@ -415,20 +398,22 @@ class ModelWrapper(L.LightningModule):
         optimizer = optim.Adam(
             self.parameters(),
             lr=self.lr,
+            weight_decay=self.weight_decay
         )
         lr_scheduler = {
             "scheduler": optim.lr_scheduler.MultiStepLR(
                 optimizer,
                 milestones=[
-                    int(self.max_epoch * 0.25),
-                    int(self.max_epoch * 0.5),
-                    int(self.max_epoch * 0.75),
+                    int(self.max_epoch * 0.3),
+                    int(self.max_epoch * 0.6),
+                    int(self.max_epoch * 0.8),
                 ],
                 gamma=0.1
             ),
             "name": "lr_scheduler",
         }
         return [optimizer], [lr_scheduler]
+
 
 def train_model(
     model_arch,
@@ -438,10 +423,14 @@ def train_model(
     max_epochs=100,
     num_classes=5,
     class_weights=None,
+    label_names=None,
     early_stopping=True,
     patience=10,
     save_model=True,
-    save_dir="models"
+    save_dir="models",
+    use_focal_loss=False,
+    gamma=2.0,
+    weight_decay=1e-4
 ):
     """
     训练EEG分类模型
@@ -454,10 +443,14 @@ def train_model(
         max_epochs: 最大训练轮数
         num_classes: 分类类别数
         class_weights: 类别权重（用于处理类别不平衡）
+        label_names: 类别标签名称列表
         early_stopping: 是否使用早停
         patience: 早停的耐心值（多少轮验证损失没有改善后停止训练）
         save_model: 是否保存模型
         save_dir: 模型保存目录
+        use_focal_loss: 是否使用Focal Loss
+        gamma: Focal Loss的gamma参数
+        weight_decay: 权重衰减系数
         
     返回:
         训练好的模型封装器
@@ -470,7 +463,11 @@ def train_model(
         lr=learning_rate,
         max_epoch=max_epochs,
         num_classes=num_classes,
-        class_weights=class_weights
+        class_weights=class_weights,
+        label_names=label_names,
+        use_focal_loss=use_focal_loss,
+        gamma=gamma,
+        weight_decay=weight_decay
     )
     
     # 设置回调
@@ -513,59 +510,11 @@ def train_model(
     )
     
     # 训练模型
+    print("开始训练模型...")
     trainer.fit(model)
     
     # 测试模型
+    print("开始测试模型...")
     trainer.test(model)
     
     return model
-
-# 使用示例
-if __name__ == "__main__":
-    from torch import nn
-    
-    # 假设你已经加载了数据集
-    # from eeg_data_processor import load_all_csv_files, EEGDataset
-    # X_all, y_all = load_all_csv_files("your_data_folder")
-    # dataset = EEGDataset(X_all, y_all)
-    
-    # 定义一个简单的EEG分类模型
-    class SimpleEEGModel(nn.Module):
-        def __init__(self, num_channels=8, num_classes=5):
-            super().__init__()
-            self.conv1 = nn.Conv1d(num_channels, 16, kernel_size=3, padding=1)
-            self.conv2 = nn.Conv1d(16, 32, kernel_size=3, padding=1)
-            self.pool = nn.MaxPool1d(2)
-            self.dropout = nn.Dropout(0.5)
-            self.fc1 = nn.Linear(32 * 62, 64)
-            self.fc2 = nn.Linear(64, num_classes)
-            
-        def forward(self, x):
-            # 输入形状: [batch_size, channels, time_points]
-            x = F.relu(self.conv1(x))
-            x = self.pool(x)
-            x = F.relu(self.conv2(x))
-            x = self.pool(x)
-            x = x.flatten(1)
-            x = self.dropout(x)
-            x = F.relu(self.fc1(x))
-            x = self.fc2(x)
-            return x
-    
-    # 设置类别权重（如果需要）
-    # class_weights = [1.0, 1.0, 1.5, 1.0, 0.8]  # 增加"上"类别的权重
-    
-    # 训练模型
-    # model_arch = SimpleEEGModel(num_channels=8, num_classes=5)
-    # trained_model = train_model(
-    #     model_arch=model_arch,
-    #     dataset=dataset,
-    #     batch_size=64,
-    #     learning_rate=0.001,
-    #     max_epochs=50,
-    #     num_classes=5,
-    #     class_weights=class_weights,
-    #     early_stopping=True,
-    #     patience=5,
-    #     save_model=True
-    # )
