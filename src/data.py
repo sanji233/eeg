@@ -58,8 +58,8 @@ class EEGConfig:
     ]
     
     # 滤波器参数
-    FILTER_L_FREQ = 0  # 低频截止，Hz
-    FILTER_H_FREQ = 60  # 高频截止，Hz
+    FILTER_L_FREQ = 0.1  # 低频截止，Hz
+    FILTER_H_FREQ = 50  # 高频截止，Hz
     NOTCH_FREQ = 50  # 陷波频率（电源线），Hz
     NUM_CHANNELS = 8
     # 窗口参数默认值
@@ -221,7 +221,7 @@ class EEGPreprocessor:
         
         # 创建状态区间标记数组 (0表示未标记的背景状态，不同于REST_STATE_LABEL)
         n_samples = len(raw.times)
-        state_markers = np.zeros(n_samples, dtype=np.int64)
+        state_markers = np.full(n_samples, -1, dtype=np.int64)
 
         #DEBUG用
         print("处理的总事件数:", len(events))
@@ -256,15 +256,18 @@ class EEGPreprocessor:
             # 提取当前窗口的数据
             window_data = eeg_data[:, start_sample:end_sample]
             
+
             # 确定窗口标签
             window_states = state_markers[start_sample:end_sample]
             unique_states, state_counts = np.unique(window_states, return_counts=True)
             
+            
             # 如果窗口中有标记的状态，选择占比最大的状态作为标签
             # 排除未标记状态(0)，除非所有状态都是未标记状态
-            valid_states = unique_states[unique_states != 0] if 0 in unique_states else unique_states
-            valid_counts = state_counts[unique_states != 0] if 0 in unique_states else state_counts
-            
+
+            valid_states = unique_states[unique_states != -1] if -1 in unique_states else unique_states
+            valid_counts = state_counts[unique_states != -1] if -1 in unique_states else state_counts
+
             if len(valid_states) > 0:
                 # 找出样本点数量最多的状态
                 max_idx = np.argmax(valid_counts)

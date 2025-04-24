@@ -33,13 +33,13 @@ WINDOW_STEP = 0.5                 # 窗口步长(秒)
 STATE_DURATION = 6             # 状态持续时间(秒)
 
 # 模型参数
-MODEL = 'eegnet'             # 可选: 'eegnet', 'transformer', 'cnnlstm', 'deepconv', 'efficient'
+MODEL = 'cnnlstm'             # 可选: 'eegnet', 'transformer', 'cnnlstm', 'deepconv', 'efficient'
 
 # 训练参数
 BATCH_SIZE = 32                   # 批量大小
-LEARNING_RATE = 0.001             # 学习率
-MAX_EPOCHS = 100                  # 最大训练轮数
-PATIENCE = 100                     # 早停耐心值
+LEARNING_RATE = 1e-4             # 学习率
+MAX_EPOCHS = 10000                  # 最大训练轮数
+PATIENCE = 10000                     # 早停耐心值
 USE_GPU = True                    # 是否使用GPU
 SEED = 42                         # 随机种子
 
